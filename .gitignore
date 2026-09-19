@@ -1,0 +1,17 @@
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Runtime output
+artifacts/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Deployed copy of the tool (lives in the jev-ultrafast clone, not here)
+jev_mcp_deployed.py
