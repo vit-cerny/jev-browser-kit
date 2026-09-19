@@ -60,14 +60,36 @@ Tools exposed:
 
 | Tool | Returns |
 |---|---|
-| `jev_search(goal, url?, max_content_chars?)` | `status`, `final_url`, `title`, `content` (visible page text), `visited` action trace, `elapsed_ms`, `usage` |
+| `jev_search(goal, url?, max_content_chars?, include_log?)` | `status`, `final_url`, `title`, `content` (visible page text), `visited` action trace, `elapsed_ms`, `usage`, and a cumulative **`totals` counter** |
 | `jev_stats(limit?)` | searches, total/avg elapsed, TypeSafe input tokens, decisions, text tokens, estimated cost |
+
+### Time and price counter
+
+Every `jev_search` result ends with a cumulative counter, so the caller always knows the
+running cost without a second call:
+
+```json
+"totals": {
+  "searches": 8,
+  "total_elapsed_s": 172.2,
+  "avg_elapsed_ms": 21524,
+  "total_typesafe_input_tokens": 443120,
+  "total_cost_usd": 0.01861104
+}
+```
+
+Pass `include_log: true` to also get the last 10 searches (timestamp, status, duration,
+cost, goal). The CLI prints a one-line counter to stderr after every search:
+
+```
+[jev] 8 searches  172.2s total  $0.01861104 cumulative
+```
 
 From the terminal:
 
 ```powershell
-# one-off search
-python jev_mcp.py --search "<goal>" --url "https://www.google.com/travel/flights?hl=en"
+# one-off search (add --log for the search log)
+python jev_mcp.py --search "<goal>" --url "https://www.google.com/travel/flights?hl=en" --log
 
 # usage + cost totals
 python jev_mcp.py --stats

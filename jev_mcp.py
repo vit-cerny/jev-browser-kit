@@ -6,7 +6,7 @@ and anything else that supports MCP.
 
 CLI (for testing or terminal use):
     python jev_mcp.py --search "Find the cheapest flight from Prague to Barcelona"
-    python jev_mcp.py --search "..." --url "https://www.google.com/imghp"
+    python jev_mcp.py --search "..." --url "https://www.google.com/imghp" --log
     python jev_mcp.py --stats
     python jev_mcp.py --serve          # live stats dashboard at http://127.0.0.1:8767
     python jev_mcp.py --configure      # guided setup: API keys + browser choice
@@ -175,7 +175,7 @@ def read_ledger():
     return rows
 
 
-def run_search(goal, url=None, max_content_chars=6000):
+def run_search(goal, url=None, max_content_chars=6000, include_log=False):
     """Run one Jev search and return a result the calling LLM can act on."""
     load_env()
     started_iso = datetime.now(timezone.utc).isoformat()
@@ -261,6 +261,20 @@ def run_search(goal, url=None, max_content_chars=6000):
             **usage,
         }
     )
+
+    rows = read_ledger()
+    result["totals"] = counter_summary(rows)
+    if include_log:
+        result["log"] = [
+            {
+                "ts": row.get("ts"),
+                "status": row.get("status"),
+                "elapsed_ms": row.get("elapsed_ms"),
+                "cost_usd": row.get("est_cost_usd"),
+                "goal": row.get("goal"),
+            }
+            for row in rows[-10:]
+        ]
     return result
 
 
@@ -292,6 +306,18 @@ def aggregate(rows):
         "statuses": {s: sum(1 for r in rows if r.get("status") == s) for s in {r.get("status") for r in rows}},
     }
     return totals
+
+
+def counter_summary(rows):
+    """Cumulative time and price counter shown when a search finishes."""
+    totals = aggregate(rows)
+    return {
+        "searches": totals["searches"],
+        "total_elapsed_s": totals["total_elapsed_s"],
+        "avg_elapsed_ms": totals["avg_elapsed_ms"],
+        "total_typesafe_input_tokens": totals["total_typesafe_input_tokens"],
+        "total_cost_usd": totals["total_cost_usd"],
+    }
 
 
 def format_stats(totals, recent=None):
@@ -438,12 +464,16 @@ if MCPServer is not None:
             "the exact page to open (e.g. 'https://www.google.com/travel/flights?hl=en'). Omitting "
             "url runs a Google keyword search of your goal sentence - useless for sentence-like "
             "goals. Takes 15-60s; wait, do not retry. content is page text to reason over; final_url "
-            "is ground truth. status:'done' is the agent's claim, not proof of success."
+            "is ground truth. status:'done' is the agent's claim, not proof of success. Every "
+            "result ends with a cumulative totals counter (searches, total time, total cost); "
+            "pass include_log=true to also get the recent search log."
         )
     )
-    def jev_search(goal: str, url: str = "", max_content_chars: int = 6000) -> str:
+    def jev_search(
+        goal: str, url: str = "", max_content_chars: int = 6000, include_log: bool = False
+    ) -> str:
         try:
-            result = run_search(goal, url or None, max_content_chars)
+            result = run_search(goal, url or None, max_content_chars, include_log)
         except Exception as error:
             result = {"status": "error", "goal": goal, "error": f"{type(error).__name__}: {error}"}
         return json.dumps(result, indent=2, ensure_ascii=False)
@@ -532,14 +562,21 @@ def main(argv):
         idx = argv.index("--search")
         goal = argv[idx + 1] if len(argv) > idx + 1 else None
         if not goal:
-            print("usage: --search \"<goal>\" [--url <url>]")
+            print("usage: --search \"<goal>\" [--url <url>] [--log]")
             return 2
         url = argv[argv.index("--url") + 1] if "--url" in argv else None
         try:
-            result = run_search(goal, url)
+            result = run_search(goal, url, include_log="--log" in argv)
         except Exception as exc:
             result = {"status": "error", "goal": goal, "url": url, "error": f"{type(exc).__name__}: {exc}"}
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        totals = result.get("totals")
+        if totals:
+            print(
+                f"[jev] {totals['searches']} searches  {totals['total_elapsed_s']}s total  "
+                f"${totals['total_cost_usd']} cumulative",
+                file=sys.stderr,
+            )
         return 0 if result.get("status") != "error" else 1
     if MCPServer is None:
         print("mcp package missing; run: uv add mcp", file=sys.stderr)
