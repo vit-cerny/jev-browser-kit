@@ -12,6 +12,9 @@ CLI (for testing or terminal use):
     python jev_mcp.py --configure      # guided setup: API keys + browser choice
     python jev_mcp.py --browsers       # list detected Chromium forks
     python jev_mcp.py --wipe-sandbox   # delete isolated sandbox profiles
+
+Every search saves its full result (untruncated page text included) to
+artifacts/jev_outputs/<timestamp>-<goal>.json and reports the path as output_file.
 """
 
 import json
@@ -559,7 +562,10 @@ if MCPServer is not None:
             "availability, live pages) - not for general knowledge, math, or code. ALWAYS pass url: "
             "the exact page to open (e.g. 'https://www.google.com/travel/flights?hl=en'). Omitting "
             "url runs a Google keyword search of your goal sentence - useless for sentence-like "
-            "goals. Takes 15-60s; wait, do not retry. content is page text to reason over; final_url "
+            "goals. Takes 15-60s; wait, do not retry. content is the page text capped at "
+            "max_content_chars; full_content is the complete untruncated text, kept for you to "
+            "analyze at the end. Every run is also saved as JSON under artifacts/jev_outputs/ "
+            "(path in output_file). final_url "
             "is ground truth. status:'done' is the agent's claim, not proof of success. Every "
             "result ends with a cumulative totals counter (searches, total time, total cost); "
             "pass include_log=true to also get the recent search log."
@@ -685,6 +691,10 @@ def main(argv):
             result = {"status": "error", "goal": goal, "url": url,
                       "error": redact(f"{type(exc).__name__}: {exc}")}
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        if result.get("full_content"):
+            print("\n----- full page text -----")
+            print(result["full_content"])
+            print("----- end full page text -----")
         totals = result.get("totals")
         if totals:
             print(
@@ -692,6 +702,8 @@ def main(argv):
                 f"${totals['total_cost_usd']} cumulative",
                 file=sys.stderr,
             )
+        if result.get("output_file"):
+            print(f"[jev] full output saved: {result['output_file']}", file=sys.stderr)
         return 0 if result.get("status") != "error" else 1
     if MCPServer is None:
         print("mcp package missing; run: uv add mcp", file=sys.stderr)
