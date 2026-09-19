@@ -1,0 +1,31 @@
+[project]
+name = "jev-browser-kit"
+version = "0.1.0"
+description = "Give any MCP-capable LLM harness an on-demand real-browser search tool (TypeSafe Jev) with per-run timing and cost tracking."
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+# jev-ultrafast is not on PyPI; install.ps1 clones browser-use/jev-ultrafast and applies the
+# two required patches. jev_mcp.py imports it lazily inside run_search, so importing the
+# module and running the test suite works without it.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+
+# Same rule set as the upstream jev-ultrafast repo so `ruff check .` agrees in both places.
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

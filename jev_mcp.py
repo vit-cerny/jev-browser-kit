@@ -11,17 +11,20 @@ CLI (for testing or terminal use):
     python jev_mcp.py --serve          # live stats dashboard at http://127.0.0.1:8767
     python jev_mcp.py --configure      # guided setup: API keys + browser choice
     python jev_mcp.py --browsers       # list detected Chromium forks
+    python jev_mcp.py --wipe-sandbox   # delete isolated sandbox profiles
 """
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent
 LEDGER = ROOT / "artifacts" / "jev_usage.jsonl"
@@ -59,14 +62,25 @@ def find_browser():
     return os.path.expandvars(BROWSER_FORKS[0])
 
 
-def profile_for(browser):
+def profile_for(browser, sandbox=None):
     """One profile per browser, because a Chromium fork older than the one that created a
     profile refuses to open it - sharing a directory would break the setup on switch.
-    Chrome keeps the original path so an already-consented profile survives."""
+    Chrome keeps the original path so an already-consented profile survives.
+
+    sandbox=True (or JEV_SANDBOX=1) moves to a separate profile that never sees the normal
+    browsing session. That is profile isolation, not an OS sandbox: wipe it with
+    --wipe-sandbox, or run the browser in a container and point JEV_CHROME at it."""
     override = os.environ.get("JEV_CHROME_PROFILE")
     if override:
         return Path(override)
-    return PROFILE_HOME / f"jev-{Path(browser).stem.lower()}-profile"
+    if sandbox is None:
+        sandbox = os.environ.get("JEV_SANDBOX") == "1"
+    suffix = "-sandbox" if sandbox else ""
+    return PROFILE_HOME / f"jev-{Path(browser).stem.lower()}{suffix}-profile"
+
+
+def sandbox_profiles():
+    return sorted(PROFILE_HOME.glob("jev-*-sandbox-profile"))
 
 
 def load_env(path=ROOT / ".env"):
@@ -78,13 +92,65 @@ def load_env(path=ROOT / ".env"):
             os.environ.setdefault(key.strip(), value.strip())
 
 
+SECRET_PATTERNS = (
+    re.compile(r"apikey_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+)
+
+
+def redact(text):
+    """Scrub credential-shaped strings before they reach a log, a tool result or the
+    user's LLM. Providers can echo an Authorization header back in an error message."""
+    out = str(text)
+    for pattern in SECRET_PATTERNS:
+        out = pattern.sub(lambda match: match.group(0)[:4] + "***" + match.group(0)[-2:], out)
+    return out
+
+
+ALLOWED_SCHEMES = ("http://", "https://")
+CONTENT_CHAR_CAP = 100_000
+CHROMIUM_HINTS = ("chrome", "chromium", "thorium", "brave", "edg/", "vivaldi", "opr/")
+
+
+def safe_url(raw):
+    """Validate an LLM-supplied start URL. Only http/https may be navigated: file:// would
+    read local files straight back to the model, javascript:/data: execute, and chrome://
+    exposes browser internals. The scheme was previously passed through unchecked."""
+    candidate = (raw or "").strip()
+    if not candidate:
+        return None, None
+    if not candidate.lower().startswith(ALLOWED_SCHEMES):
+        return None, f"refused non-http(s) url: {redact(candidate[:60])}"
+    return candidate, None
+
+
+def hide_url_secrets(raw):
+    """Drop userinfo and query/fragment values before a URL is persisted or served, since
+    query strings routinely carry session tokens and userinfo carries credentials."""
+    text = str(raw or "")
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return redact(text)
+    if not parts.scheme:
+        return redact(text)
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, "<redacted>" if parts.query else "", ""))
+
+
 def debug_alive():
+    """Confirm the debug port is served by a Chromium browser, not just any local process
+    that happens to answer on it."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json/version", timeout=3) as response:
-            json.load(response)
-        return True
+            info = json.load(response)
     except Exception:
         return False
+    browser = str(info.get("Browser", "")).lower()
+    return any(hint in browser for hint in CHROMIUM_HINTS)
 
 
 def ensure_chrome():
@@ -180,7 +246,12 @@ def run_search(goal, url=None, max_content_chars=6000, include_log=False):
     load_env()
     started_iso = datetime.now(timezone.utc).isoformat()
     url_omitted = url is None
-    start_url = url or (DEFAULT_URL + quote_plus(goal))
+    start_url, url_error = safe_url(url)
+    if url_error:
+        raise ValueError(url_error)
+    if start_url is None:
+        start_url = DEFAULT_URL + quote_plus(goal)
+    max_content_chars = max(200, min(int(max_content_chars), CONTENT_CHAR_CAP))
     browser, chrome_state = ensure_chrome()
 
     from jev_ultrafast import Agent
@@ -194,7 +265,7 @@ def run_search(goal, url=None, max_content_chars=6000, include_log=False):
             for _ in agent.run():
                 pass
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
+            error = redact(f"{type(exc).__name__}: {exc}")
         snap = agent.snapshot()
 
     page = snap["page"]
@@ -251,8 +322,8 @@ def run_search(goal, url=None, max_content_chars=6000, include_log=False):
         {
             "ts": started_iso,
             "goal": goal,
-            "start_url": start_url,
-            "final_url": page.get("url"),
+            "start_url": hide_url_secrets(start_url),
+            "final_url": hide_url_secrets(page.get("url")),
             "status": snap.get("status"),
             "error": error,
             "elapsed_ms": snap.get("elapsed_ms"),
@@ -411,7 +482,7 @@ tick(); setInterval(tick,2000);
 """
 
 
-def serve(port=8767):
+def build_server(port=8767):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
@@ -425,6 +496,11 @@ def serve(port=8767):
             self.wfile.write(payload)
 
         def do_GET(self):
+            # Reject non-loopback Host headers so a DNS-rebinding page cannot read the ledger.
+            host = (self.headers.get("Host") or "").split(":")[0].strip("[]").lower()
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                self.send_text(403, json.dumps({"error": "forbidden"}))
+                return
             if self.path.startswith("/api/stats"):
                 rows = read_ledger()
                 self.send_text(200, json.dumps({"totals": aggregate(rows), "recent": rows[-30:][::-1]}))
@@ -434,7 +510,11 @@ def serve(port=8767):
         def log_message(self, *_args):
             pass
 
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def serve(port=8767):
+    build_server(port).serve_forever()
 
 
 try:
@@ -475,7 +555,7 @@ if MCPServer is not None:
         try:
             result = run_search(goal, url or None, max_content_chars, include_log)
         except Exception as error:
-            result = {"status": "error", "goal": goal, "error": f"{type(error).__name__}: {error}"}
+            result = {"status": "error", "goal": goal, "error": redact(f"{type(error).__name__}: {error}")}
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     @server.tool(
@@ -529,6 +609,10 @@ def configure():
             lines = [line for line in lines if not line.startswith(name + "=")] + [f"{name}={value}"]
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     gitignore = ROOT / ".gitignore"
     ignored = gitignore.exists() and ".env" in gitignore.read_text(encoding="utf-8")
     print(f"\nwrote {path}   git-ignored: {ignored}")
@@ -541,6 +625,16 @@ def main(argv):
     # CJK characters raised UnicodeEncodeError and emitted no output at all.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if "--wipe-sandbox" in argv:
+        profiles = sandbox_profiles()
+        for path in profiles:
+            try:
+                shutil.rmtree(path)
+                print(f"removed {path}")
+            except OSError as exc:
+                print(f"could not remove {path}: {exc}", file=sys.stderr)
+        print(f"{len(profiles)} sandbox profile(s) handled")
+        return 0
     if "--configure" in argv:
         configure()
         return 0
@@ -548,7 +642,11 @@ def main(argv):
         for candidate in BROWSER_FORKS:
             full = os.path.expandvars(candidate)
             print(f"{'[x]' if Path(full).exists() else '[ ]'} {full}")
-        print(f"selected: {find_browser()}")
+        browser = find_browser()
+        print(f"selected: {browser}")
+        print(f"profile : {profile_for(browser)}")
+        if os.environ.get("JEV_SANDBOX") == "1":
+            print("sandbox : ON (JEV_SANDBOX=1)")
         return 0
     if "--serve" in argv:
         port = int(argv[argv.index("--port") + 1]) if "--port" in argv else 8767
@@ -568,7 +666,8 @@ def main(argv):
         try:
             result = run_search(goal, url, include_log="--log" in argv)
         except Exception as exc:
-            result = {"status": "error", "goal": goal, "url": url, "error": f"{type(exc).__name__}: {exc}"}
+            result = {"status": "error", "goal": goal, "url": url,
+                      "error": redact(f"{type(exc).__name__}: {exc}")}
         print(json.dumps(result, indent=2, ensure_ascii=False))
         totals = result.get("totals")
         if totals:
