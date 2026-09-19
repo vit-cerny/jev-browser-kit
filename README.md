@@ -102,6 +102,21 @@ Every search is appended to `<repo>\artifacts\jev_usage.jsonl`.
 
 ## Security
 
-- No API keys are ever committed. `.env` is git-ignored, and `--configure` never echoes values back.
-- The project deliberately avoids piping remote scripts into a shell: there is no `irm | iex` one-liner. Run `install.ps1` from a clone you trust.
-- The stats dashboard binds to `127.0.0.1` only.
+- No API keys are ever committed. `.env` is git-ignored (and written owner-only), and
+  `--configure` never echoes values back. CI fails if `.env` is ever tracked by git, and
+  gitleaks scans every push.
+- **Non-http(s) start URLs are refused.** `url` is supplied by your LLM, so `file://` would
+  otherwise read local files - including `.env` - straight back into the model's context.
+  `javascript:`, `data:` and `chrome://` are refused too.
+- Credentials are redacted before they can reach a log, a tool result or the dashboard:
+  `apikey_`/`sk-`/`ghp_`/`github_pat_`/`AKIA` shapes are masked in error text, and userinfo
+  plus query values are stripped from URLs before they are persisted, since query strings
+  routinely carry session tokens.
+- The stats dashboard binds to `127.0.0.1` only **and** rejects non-loopback `Host`
+  headers, so a DNS-rebinding page cannot read your search ledger.
+- Run `scripts/scan-secrets.ps1` any time; it is dependency-free and masks anything it
+  prints. Pass `-FailOnFind` to use it as a pre-commit gate.
+- The project deliberately avoids piping remote scripts into a shell: there is no
+  `irm | iex` one-liner. Run `install.ps1` from a clone you trust.
+- The CDP debug port itself is unauthenticated by design (a Chrome limitation) - treat any
+  process that can reach it as able to control the browser.

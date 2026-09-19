@@ -8,6 +8,7 @@
 param(
   [string]$RepoPath = "$env:USERPROFILE\Documents\browseruse",
   [switch]$NoRegister,
+  [switch]$NoConfigure,
   [switch]$SkipVerify
 )
 # PS 5.1 turns a native command's stderr into a terminating error under "Stop"; every
@@ -201,11 +202,19 @@ if (-not $SkipVerify) {
 }
 
 Write-Host ""
-& $python -m uv run --directory $RepoPath python jev_mcp.py --browsers 2>&1 | Select-Object -Last 1
+& $python -m uv run --directory $RepoPath python jev_mcp.py --browsers 2>&1 | Select-Object -Last 3
+
+if (-not $NoConfigure -and [Environment]::UserInteractive) {
+  Write-Host ""
+  $answer = Read-Host "Run the API key + browser setup wizard now? [Y/n]"
+  if ($answer -eq "" -or $answer -match '^(?i)y') {
+    & $python -m uv run --directory $RepoPath python jev_mcp.py --configure
+  } else {
+    Write-Host "Later:  cd $RepoPath ; python jev_mcp.py --configure" -ForegroundColor Yellow
+  }
+}
 
 Write-Host "`nDone." -ForegroundColor Green
-Write-Host "  1. set API keys:    python jev_mcp.py --configure    (guided; writes $RepoPath\.env)"
-Write-Host "  2. pick a browser:  python jev_mcp.py --configure    (or set JEV_CHROME in .env)"
-Write-Host "  3. restart opencode / Codex so they pick up the jev MCP server"
-Write-Host "  4. live stats:      python jev_mcp.py --serve        ->  http://127.0.0.1:8767"
-Write-Host "  5. one-off search:  python jev_mcp.py --search ""<goal>"" --url ""<start url>"""
+Write-Host "  1. restart opencode / Codex so they pick up the jev MCP server"
+Write-Host "  2. live stats:  python jev_mcp.py --serve   ->  http://127.0.0.1:8767"
+Write-Host "  3. a search:    python jev_mcp.py --search ""<goal>"" --url ""<start url>"""

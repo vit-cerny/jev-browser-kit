@@ -28,6 +28,7 @@ from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent
 LEDGER = ROOT / "artifacts" / "jev_usage.jsonl"
+OUTPUT_DIR = ROOT / "artifacts" / "jev_outputs"
 DEFAULT_URL = "https://www.google.com/search?q="
 DEBUG_PORT = int(os.environ.get("JEV_DEBUG_PORT", "9222"))
 PROFILE_HOME = Path(os.environ.get("JEV_CHROME_PROFILE_HOME", Path.home() / ".cache"))
@@ -241,6 +242,18 @@ def read_ledger():
     return rows
 
 
+def save_output(result):
+    """Persist the full result - including the untruncated page text - under
+    artifacts/jev_outputs/, so a long page is never lost to the caller's context cap.
+    Returns the written path. The file is a superset of the tool result."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    slug = re.sub(r"[^a-z0-9]+", "-", str(result.get("goal") or "search").lower()).strip("-")[:48]
+    path = OUTPUT_DIR / f"{stamp}-{slug or 'search'}.json"
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def run_search(goal, url=None, max_content_chars=6000, include_log=False):
     """Run one Jev search and return a result the calling LLM can act on."""
     load_env()
@@ -306,6 +319,8 @@ def run_search(goal, url=None, max_content_chars=6000, include_log=False):
         "title": page.get("title"),
         "content": content[:max_content_chars],
         "content_truncated": trimmed,
+        "content_chars": len(content),
+        "full_content": content,
         "visited": [
             {"step": h.get("step"), "operation": h.get("operation"), "target": h.get("target"), "text": h.get("text")}
             for h in history
@@ -346,6 +361,7 @@ def run_search(goal, url=None, max_content_chars=6000, include_log=False):
             }
             for row in rows[-10:]
         ]
+    result["output_file"] = str(save_output(result))
     return result
 
 
